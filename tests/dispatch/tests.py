@@ -75,7 +75,7 @@ class DispatcherTests(SimpleTestCase):
         a_signal.disconnect(receiver_1_arg, sender=object)
         self.assertTestIsClean(a_signal)
 
-    def test_garbage_collected(self):
+    def test_garbage_collected_receiver(self):
         a = Callable()
         a_signal.connect(a.a, sender=self)
         del a
@@ -83,6 +83,39 @@ class DispatcherTests(SimpleTestCase):
         result = a_signal.send(sender=self, val="test")
         self.assertEqual(result, [])
         self.assertTestIsClean(a_signal)
+
+    def test_garbage_collected_sender(self):
+        """Receiver shouldn't be called after its sender is GCed"""
+        # This could happen if a new object is created with the same id as the
+        # previous sender and attached to the same signal. This happens
+        # inconsistently at the whim of the allocator so destroy and create
+        # senders a number of times to increase the likelihood of id re-use.
+        # Use an ephemeral signal instance, as with no reference to the
+        # original now-dead senders it's not possible to disconnect its
+        # receivers and so keep the signal clean between tests.
+        signal = Signal()
+        tries = 20
+        call_count = 0
+
+        dont_gc_receivers = []
+        def create_receiver():
+            def receiver(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+            dont_gc_receivers.append(receiver)
+            return receiver
+
+        for _ in range(tries):
+            sender = object()
+            receiver = create_receiver()
+            signal.connect(receiver, sender)
+
+            call_count = 0
+            signal.send(sender)
+            self.assertEqual(call_count, 1)
+
+            sender = None
+            garbage_collect()
 
     def test_cached_garbaged_collected(self):
         """

@@ -28,8 +28,12 @@ class Signal:
 
     Internal attributes:
 
-        receivers
-            { receiverkey (id) : weakref(receiver) }
+        receivers:
+            [((receiverkey, senderkey), ref(receiver), ref(sender), is_async)]
+        sender_receivers_cache:
+            WeakKey{sender: [receiver]}
+
+    ref is a weakref if connected with weak=True, else the direct object.
     """
 
     def __init__(self, use_caching=False):
@@ -72,9 +76,9 @@ class Signal:
 
             weak
                 Whether to use weak references to the receiver. By default, the
-                module will attempt to use weak references to the receiver
-                objects. If this parameter is false, then strong references will
-                be used.
+                module will attempt to use weak references to the receiver and
+                sender objects. If this parameter is false, then strong
+                references will be used.
 
             dispatch_uid
                 An identifier used to uniquely identify a particular instance of
@@ -110,10 +114,22 @@ class Signal:
             receiver = ref(receiver)
             weakref.finalize(receiver_object, self._remove_receiver)
 
+            # Prefer to store weakref to sender; but previously the API
+            # permitted sender to be unweakreffable (as long as not also
+            # use_caching), so to maintain this (generally unlikely)
+            # possibility fall back to strong reference.
+            try:
+                sender_ref = weakref.ref(sender)
+            except TypeError:
+                pass
+            else:
+                weakref.finalize(sender, self._remove_receiver)
+                sender = sender_ref
+
         with self.lock:
             self._clear_dead_receivers()
-            if not any(r_key == lookup_key for r_key, _, _ in self.receivers):
-                self.receivers.append((lookup_key, receiver, is_async))
+            if not any(r_key == lookup_key for r_key, _, _, _ in self.receivers):
+                self.receivers.append((lookup_key, receiver, sender, is_async))
             self.sender_receivers_cache.clear()
 
     def disconnect(self, receiver=None, sender=None, dispatch_uid=None):
@@ -411,6 +427,7 @@ class Signal:
                 r
                 for r in self.receivers
                 if not (isinstance(r[1], weakref.ReferenceType) and r[1]() is None)
+                and not (isinstance(r[2], weakref.ReferenceType) and r[2]() is None)
             ]
 
     def _live_receivers(self, sender):
@@ -432,9 +449,9 @@ class Signal:
                 self._clear_dead_receivers()
                 senderkey = _make_id(sender)
                 receivers = []
-                for (_receiverkey, r_senderkey), receiver, is_async in self.receivers:
+                for (_receiverkey, r_senderkey), receiver, sender_ref, is_async in self.receivers:
                     if r_senderkey == NONE_ID or r_senderkey == senderkey:
-                        receivers.append((receiver, is_async))
+                        receivers.append((receiver, sender_ref, is_async))
                 if self.use_caching:
                     if not receivers:
                         self.sender_receivers_cache[sender] = NO_RECEIVERS
@@ -443,20 +460,18 @@ class Signal:
                         self.sender_receivers_cache[sender] = receivers
         non_weak_sync_receivers = []
         non_weak_async_receivers = []
-        for receiver, is_async in receivers:
+        for receiver, sender_ref, is_async in receivers:
+            # Skip if the receiver/sender is a dead weakref
             if isinstance(receiver, weakref.ReferenceType):
-                # Dereference the weak reference.
                 receiver = receiver()
-                if receiver is not None:
-                    if is_async:
-                        non_weak_async_receivers.append(receiver)
-                    else:
-                        non_weak_sync_receivers.append(receiver)
+                if receiver is None:
+                    continue
+            if isinstance(sender_ref, weakref.ReferenceType) and sender_ref() is None:
+                continue
+            if is_async:
+                non_weak_async_receivers.append(receiver)
             else:
-                if is_async:
-                    non_weak_async_receivers.append(receiver)
-                else:
-                    non_weak_sync_receivers.append(receiver)
+                non_weak_sync_receivers.append(receiver)
         return non_weak_sync_receivers, non_weak_async_receivers
 
     def _remove_receiver(self, receiver=None):
