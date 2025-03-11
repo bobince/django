@@ -35,6 +35,7 @@ from .models import (
     RChildChild,
     Referrer,
     S,
+    SetNullReferent,
     T,
     User,
     create_a,
@@ -525,6 +526,25 @@ class DeletionTests(TestCase):
         queries = fetches_to_mem + TEST_SIZE // GET_ITERATOR_CHUNK_SIZE
         self.assertNumQueries(queries, Avatar.objects.all().delete)
         self.assertFalse(Avatar.objects.exists())
+
+    def test_large_delete_with_update(self):
+        # When a model has a foreign key with SET_NULL referring to instances
+        # being deleted, the update that sets that field to NULL should be done
+        # in batches to avoid using more query parameters than a backend limit.
+        TEST_SIZE = 2000
+        objs = [SetNullReferent() for i in range(TEST_SIZE)]
+        SetNullReferent.objects.bulk_create(objs)
+        # Calculate the number of batches needed.
+        batch_size = connection.ops.bulk_batch_size(["pk"], objs)
+        batches = ceil(len(objs) / batch_size)
+        # One query for selecting SetNullReferent.objects.all() and then one
+        # related update to SetNullReferrer.reference for each batch.
+        fetches_to_mem = 1 + batches
+        # The SetNullReferrer objects are going to be deleted in batches of
+        # GET_ITERATOR_CHUNK_SIZE.
+        queries = fetches_to_mem + TEST_SIZE // GET_ITERATOR_CHUNK_SIZE
+        self.assertNumQueries(queries, SetNullReferent.objects.all().delete)
+        self.assertFalse(SetNullReferent.objects.exists())
 
     def test_large_delete_related(self):
         TEST_SIZE = 2000

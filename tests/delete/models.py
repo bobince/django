@@ -136,6 +136,14 @@ class Avatar(models.Model):
     desc = models.TextField(null=True)
 
 
+class SetNullReferent(models.Model):
+    pass
+
+
+class SetNullReferrer(models.Model):
+    reference = models.ForeignKey(SetNullReferent, null=True, on_delete=models.SET_NULL)
+
+
 # This model is used to test a duplicate query regression (#25685)
 class AvatarProxy(Avatar):
     class Meta:
